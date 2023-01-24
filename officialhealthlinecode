@@ -1,0 +1,916 @@
+#include <WiFi.h>
+#include <Keypad.h>
+#include <ESP32Servo.h>
+#include <Adafruit_Fingerprint.h>
+#include <LiquidCrystal.h>
+
+#define mySerial Serial2
+#define BUZZER_PIN 15
+#define SERVO_PIN 13
+#define PIN_IN1 27
+#define PIN_IN2 26
+#define PIN_ENA 14
+
+bool LOCKED = 0;
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+uint8_t id;
+bool FP = 0;  //  this is finger print read or not read
+
+//servo
+int pos = 0;
+Servo servodoor;
+
+//tones
+#define NOTE_C4 262
+#define NOTE_G3 196
+#define NOTE_A3 220
+#define NOTE_B3 247
+#define NOTE_C4 262
+
+int melody[] = {
+  NOTE_C4, NOTE_G3, NOTE_G3, NOTE_A3, NOTE_G3, 0, NOTE_B3, NOTE_C4  
+};
+
+int noteDurations[] = { 
+  4, 8, 8, 4, 4, 4, 4, 4
+};
+
+// Numpad
+#define ROW_NUM 4
+#define COLUMN_NUM 4
+
+char Keys[ROW_NUM][COLUMN_NUM] = {
+  { '1', '2', '3', 'A' },
+  { '4', '5', '6', 'B' },
+  { '7', '8', '9', 'C' },
+  { '*', '0', '#', 'D' }
+};
+
+byte pin_rows[ROW_NUM] = { 12, 25, 33, 1 };
+byte pin_column[COLUMN_NUM] = { 3, 4, 0, 2 };
+
+Keypad keypad = Keypad(makeKeymap(Keys), pin_rows, pin_column, ROW_NUM, COLUMN_NUM);
+
+String input_password;
+const String password = "5689";
+
+LiquidCrystal lcd(22, 23, 5, 18, 19, 21);
+
+const char* ssid = "***";
+const char* pass = "***";
+
+
+WiFiServer server(80);
+
+String header;
+
+String output14State = "off";
+String output27State = "off";
+
+
+
+unsigned long currentTime = millis();
+unsigned long previousTime = 0;
+const long timeoutTime = 2000;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected.");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+  server.begin();
+  input_password.reserve(32);
+  pinMode(PIN_IN1, OUTPUT);
+  pinMode(PIN_IN2, OUTPUT);
+  pinMode(PIN_ENA, OUTPUT);
+  servodoor.attach(SERVO_PIN, 500, 2400);
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Enroll Finger");
+  enrollfinger();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Access web:");
+  lcd.setCursor(1, 1);
+  lcd.print(WiFi.localIP());
+  delay(7000);
+  pill();
+}
+
+void loop() {
+  WiFiClient client = server.available();  // Listen for incoming clients
+
+  if (client) {  // If a new client connects,
+    currentTime = millis();
+    previousTime = currentTime;
+    Serial.println("New Client.");                                             // print a message out in the serial port
+    String currentLine = "";                                                   // make a String to hold incoming data from the client
+    while (client.connected() && currentTime - previousTime <= timeoutTime) {  // loop while the client's connected
+      currentTime = millis();
+      if (client.available()) {  // if there's bytes to read from the client,
+        char c = client.read();  // read a byte, then
+        Serial.write(c);         // print it out the serial monitor
+        header += c;
+        if (c == '\n') {  // if the byte is a newline character
+          // if the current line is blank, you got two newline characters in a row.
+          // that's the end of the client HTTP request, so send a response:
+          if (currentLine.length() == 0) {
+            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
+            // and a content-type so the client knows what's coming, then a blank line:
+            client.println("HTTP/1.1 200 OK");
+            client.println("Content-type:text/html");
+            client.println("Connection: close");
+            client.println();
+
+
+            if (header.indexOf("GET /14/on") >= 0) {
+              Serial.println("GPIO 14 on");
+              output14State = "Ready";
+              //digitalWrite(output14, HIGH);
+              delay(500);
+              pillsound();
+              delay(500);
+              pillready();
+              delay(1000);
+              passwordcode();
+
+            } else if (header.indexOf("GET /14/off") >= 0) {
+              Serial.println("GPIO 14 off");
+              output14State = "off";
+              // digitalWrite(output14, LOW);
+            } else if (header.indexOf("GET /27/on") >= 0) {
+              Serial.println("GPIO 27 on");
+              //output27State = "on";
+              output27State = "Picture Taken";
+              // digitalWrite(output27, HIGH);
+            } else if (header.indexOf("GET /27/off") >= 0) {
+              Serial.println("GPIO 27 off");
+              output27State = "Picture Taken";
+              //digitalWrite(output27, LOW);
+            }
+
+            // Display the HTML web page
+            client.println("<!DOCTYPE html><html>");
+            client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+            client.println("<link rel=\"icon\" href=\"data:,\">");
+            // CSS to style the on/off buttons
+
+            client.println("<style>html { font-family: Helvetica; background-color: #92a8d1; display: inline-block; margin: 0px auto; text-align: center;}");  //Helvetica    inline-block
+            client.println(".button { background-color: SlateBlue; border: inset; color: White; padding: 16px 40px; border-radius:16px;");
+            client.println("text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}");
+            client.println(".button2 {background-color: #555555;}</style></head>");
+
+            // Web Page Heading
+            client.println("<body><h1 style=\"background-color:SlateBlue; border: 2px inset White; color:White;\">Opioid Pill Dispenser</h1>");
+            client.println("<h2>ENGR 697</h2>");
+
+            // Display current state, and ON/OFF buttons for GPIO 26
+            client.println("<p>  Pill dispenser - State " + output14State + "</p>");
+            client.println("<p><mark>Use this button to access pill dispenser </mark></p>");
+            client.println("<p><i><small>When button is in refresh click it to enable access to dispenser</small></i></p>");
+            client.println("<p><i><u><small>Note:</u> once you access dispenser you will have to wait for pill pack to be dispensed to gain access to website again</small></i></p>");
+            // If the output26State is off, it displays the ON button
+            if (output14State == "off") {
+              client.println("<p><a href=\"/14/on\"><button class=\"button\">Ready</button></a></p>");
+            } else {
+              client.println("<p><a href=\"/14/off\"><button class=\"button button2\">Refresh</button></a></p>");
+            }
+
+            // Display current state, and ON/OFF buttons for GPIO 27
+            client.println("<p>Camera " + output27State + "</p>");
+            client.println("<p>Use button to access most recent picture </p>");
+            // If the output27State is off, it displays the ON button
+            if (output27State == "off") {
+              client.println("<p><a href=\"/27/on\"><button class=\"button\">Take Picture</button></a></p>");
+            } else {
+              client.println("<p><a href=\"/27/off\"><button class=\"button button2\">Take Picture</button></a></p>");
+            }
+
+            client.println("</body><body><h2 style=\"background-color:SlateBlue; color:white; text-align:left; border: 2px inset White;\"><i>Dispensing Schedule | Pill name</i></h2>");
+            //background-color:SlateBlue;
+
+            client.println("<p style=\"font-family:Helvetica;\" > <b> Morning: 8:00AM  |   Afternoon: 1:00PM  |  Night: 6:00PM </b></p>");
+
+            client.println("<table style=\"width: 100%; table-align:center; border-spacing: 20px; padding: 20px; text-align: center; border: 1px solid Black; border-collapse: collapse;\">");
+
+            client.println("<tr style=\"background-color:Gray;\"><th></th><th style=\"border: 1px solid Black;\">Sunday</th><th style=\"border: 1px solid Black;\">Monday</th><th style=\"border: 1px solid Black;\">Tuesday</th><th style=\"border: 1px solid Black;\">Wensday</th><th style=\"border: 1px solid Black;\">Thursday</th><th style=\"border: 1px solid Black;\">Friday</th><th style=\"border: 1px solid Black;\">Saturday</th></tr>");
+
+            client.println("<tr><td style=\"border: 1px solid Black; background-color:Gray;\">Morning<br><br></td><td style=\"border: 1px solid Black;\"> <a href=\"https://oxycontin.com/patient/index.html \">OxyContin</a><br><a href=\"https://medlineplus.gov/druginfo/meds/a601006.html \">Vicodin</a></td>");
+            client.println("<td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td><td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td>");
+            client.println("<td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td><td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td>");
+            client.println("<td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td><td style=\"border: 1px solid Black;\">Pillname1<br>Pillname 2</td></tr>");
+
+
+            client.println("<tr><td style=\"border: 1px solid Black; background-color:Gray;\">Afternoon<br><br></td><td style=\"border: 1px solid Black;\">Pillname 1<br>Pillname 2</td>");
+            client.println("<td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td><td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td>");
+            client.println("<td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td><td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td>");
+            client.println("<td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td><td style=\"border: 1px solid Black;\">Pillname1<br>Pillname 2</td></tr>");
+
+
+            client.println("<tr><td style=\"border: 1px solid Black; background-color:Gray;\">Night<br><br></td><td style=\"border: 1px solid Black;\">Pillname 1<br>Pillname 2</td>");
+            client.println("<td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td><td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td>");
+            client.println("<td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td><td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td>");
+            client.println("<td style=\"border: 1px solid Black;\">Pillname1<br>Pillname2</td><td style=\"border: 1px solid Black;\">Pillname1<br>Pillname 2</td></tr>");
+
+            client.println("</table>");
+            client.println("<p><a href=\"https://nida.nih.gov/research-topics/opioids \">Learn more about the dangers of abusing opioids</a></p>");
+            client.println("<h2 style=\"background-color:SlateBlue; color:white; text-align:left; border: 2px inset White;\"><i>Camera module</i></h2>");
+
+            client.println("<img src=\"http://192.168.43.31/capture\">");
+            client.println("<img src=\"http://192.168.43.31/stream\">");
+            client.println("<p><a href=\"http://192.168.43.31/capture\">Click to view camera</a></p>");
+            //client.println("<p><a href=\"    \">Click to view camera</a></p>");
+
+
+            // <a href=\"https://oxycontin.com/patient/index.html \">OxyContin</a>
+
+            client.println("</body></html>");
+
+            // The HTTP response ends with another blank line
+            client.println();
+            // Break out of the while loop
+            break;
+          } else {  // if you got a newline, then clear currentLine
+            currentLine = "";
+          }
+        } else if (c != '\r') {  // if you got anything else but a carriage return character,
+          currentLine += c;      // add it to the end of the currentLine
+        }
+      }
+    }
+    // Clear the header variable
+    header = "";
+    // Close the connection
+    client.stop();
+    Serial.println("Client disconnected.");
+    Serial.println("");
+  }
+}
+void pill() {
+  lcd.clear();
+
+  Serial.println("Healthline intro screen");
+  byte image07[8] = { B00000, B00000, B00000, B00001, B00011, B00110, B00111, B00111 };
+  byte image10[8] = { B00000, B00000, B00000, B10000, B11000, B01100, B00100, B00100 };
+  byte image23[8] = { B00111, B00111, B00111, B00011, B00001, B00000, B00000, B00000 };
+  byte image08[8] = { B00000, B00000, B00000, B11111, B11111, B00111, B11111, B11111 };
+  byte image24[8] = { B11111, B11111, B11111, B11111, B11111, B00000, B00000, B00000 };
+  byte image26[8] = { B00100, B00100, B01100, B11000, B10000, B00000, B00000, B00000 };
+  byte image09[8] = { B00000, B00000, B00000, B11111, B00000, B00000, B00000, B00000 };
+  byte image25[8] = { B00000, B00000, B00000, B00000, B11111, B00000, B00000, B00000 };
+
+
+  lcd.createChar(0, image07);
+  lcd.createChar(1, image10);
+  lcd.createChar(2, image23);
+  lcd.createChar(3, image08);
+  lcd.createChar(4, image24);
+  lcd.createChar(5, image26);
+  lcd.createChar(6, image09);
+  lcd.createChar(7, image25);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Health");
+  lcd.setCursor(1, 1);
+  lcd.print("Line");
+  lcd.setCursor(11, 0);
+  lcd.print("ENGR");
+  lcd.setCursor(12, 1);
+  lcd.print("697");
+  lcd.setCursor(6, 0);
+  lcd.write(byte(0));
+  lcd.setCursor(9, 0);
+  lcd.write(byte(1));
+  lcd.setCursor(6, 1);
+  lcd.write(byte(2));
+  lcd.setCursor(7, 0);
+  lcd.write(byte(3));
+  lcd.setCursor(7, 1);
+  lcd.write(byte(4));
+  lcd.setCursor(9, 1);
+  lcd.write(byte(5));
+  lcd.setCursor(8, 0);
+  lcd.write(byte(6));
+  lcd.setCursor(8, 1);
+  lcd.write(byte(7));
+  delay(1000);
+}
+
+
+void pillready() {
+  lcd.clear();
+  lcd.setCursor(1, 0);
+  lcd.print("PillPack Ready");
+  lcd.setCursor(0, 1);
+  lcd.print("Scan FingerPrint");
+}
+
+
+void sitonefingeraccepted() {
+  accepted();
+  delay(2000);
+  dispensepills();
+  delay(2000);
+  takepills();
+  delay(2000);
+  pill();
+}
+
+void sittwofingerdenied() {
+  denied();
+  delay(2000);
+  tryagain();
+}
+
+void sitthreepasscodeaccepted() {
+  accepted();
+  delay(2000);
+  faceoncamera();
+  delay(2000);
+  dispensepills();
+  delay(2000);
+  Serial.println("Take  pills");
+  takepills();
+  delay(2000);
+  pill();
+}
+
+void sitfourpasscodedenied() {
+  denied();
+  delay(2000);
+  faceoncamera();
+  delay(2000);
+  pill();
+  scan();
+}
+
+void scan() {
+  Serial.println("Scan fingerprint");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Scan FingerPrint");
+}
+
+void accepted() {
+  Serial.println("Accepted");
+  lcd.clear();
+  lcd.setCursor(4, 0);
+  lcd.print("Accepted");
+  delay(1000);
+}
+void denied() {
+  Serial.println("Denied");
+  lcd.clear();
+  lcd.setCursor(5, 0);
+  lcd.print("Denied");
+  delay(1000);
+}
+
+void dispensepills() {
+  Serial.println("Dispense Pills Using App");
+  lcd.clear();
+  lcd.setCursor(1, 0);
+  lcd.print("Dispense Pills");
+  delay(1000);
+}
+
+void takepills() {
+  for (pos = 0; pos <= 30; pos += 1) {
+    servodoor.write(pos);
+    delay(15);
+  }
+  servodoor.write(29);
+  delay(2000);
+  DCMOTOR();
+  lcd.clear();
+  lcd.setCursor(1, 0);
+  lcd.print("Take PillPack");
+  Serial.println("take pillpack");
+
+  Countdown(3);
+
+  Serial.println("ServoDoor closes");
+
+  for (pos = 45; pos >= 0; pos -= 1) {
+    // tell servo to go to position in variable 'pos'
+    servodoor.write(pos);
+    // wait 15 ms for servo to reach the position
+    delay(15);  // Wait for 15 millisecond(s)
+  }
+  servodoor.write(1);
+}
+
+void tryagain() {
+  Serial.println("try again");
+  lcd.clear();
+  lcd.setCursor(2, 0);
+  lcd.print("Try Again ");
+  lcd.setCursor(2, 1);
+  lcd.print("Use Passcode");
+  delay(1000);
+}
+
+void pillalert() {
+  lcd.clear();
+  lcd.setCursor(1, 0);
+  lcd.print("PillPack Ready");
+  pillsound();
+  delay(1000);
+}
+
+void faceoncamera() {
+  lcd.clear();
+
+  byte image01[8] = { B00000, B00011, B00100, B01000, B10000, B10011, B10011, B10000 };
+  byte image02[8] = { B00000, B11000, B00100, B00010, B00001, B11001, B11001, B00001 };
+  byte image17[8] = { B10100, B10110, B10011, B10000, B01000, B00100, B00011, B00000 };
+  byte image18[8] = { B00101, B01101, B11001, B00001, B00010, B00100, B11000, B00000 };
+
+
+  lcd.createChar(0, image01);
+  lcd.createChar(1, image02);
+  lcd.createChar(2, image17);
+  lcd.createChar(3, image18);
+
+
+  lcd.setCursor(0, 0);
+  lcd.write(byte(0));
+  lcd.setCursor(1, 0);
+  lcd.write(byte(1));
+  lcd.setCursor(0, 1);
+  lcd.write(byte(2));
+  lcd.setCursor(1, 1);
+  lcd.write(byte(3));
+  lcd.setCursor(3, 0);
+  lcd.print("Smile You're");
+  lcd.setCursor(4, 1);
+  lcd.print("On Camera");
+  delay(1000);
+}
+
+void passwordcode() {
+  LOCKED = 0;
+  Serial.println("Checking for fingerprint or password");
+  while (!LOCKED) {
+    Serial.print(" Locked Value:");
+    Serial.println(LOCKED);
+    while (!FP) {
+      Serial.print(" FP Value:");
+      Serial.println(FP);
+
+      int temp = getFingerprintID();
+      Serial.println(temp);
+      if (temp == 1) {  // Finger Print Correct
+        FP = 1;
+        LOCKED = 1;
+        sitonefingeraccepted();
+
+      } else if (temp == 9) {  //Finger print Wrong
+        FP = 1;
+        sittwofingerdenied();
+
+      } else {  //Finger print not read
+        // input finger lcd display
+      }
+      //LOCKED = getFingerprintID();
+    }
+
+    if (FP && !LOCKED) {
+      char key = keypad.getKey();
+      //char key = 0;
+      Serial.println(key);
+
+      if (key) {
+        Serial.println(key);
+        if (key == '*') {
+          input_password = "";  // clear input password
+        } else if (key == '#') {
+          if (input_password == password) {
+            //input_password== "0123" used to be password == input_password
+            Serial.println("Password Accepted");
+            //correct password LCD
+            sitthreepasscodeaccepted();
+            LOCKED = 1;
+          } else {
+            //incorrect password LCD
+            Serial.println("Password Denied");
+            sitfourpasscodedenied();
+            FP = 0;
+          }
+          input_password = "";  //clear input password
+        } else {
+          input_password += key;  //append new char to input
+          Serial.println(input_password);
+        }
+      }
+    }
+    //FP=0;
+  }
+
+  Serial.println("End of Function Everything Locked");
+  LOCKED = 0;
+  FP = 0;
+}
+
+void pillsound() {
+  // iterate over the notes of the melody:
+  for (int thisNote = 0; thisNote < 8; thisNote++) {
+    Serial.println("Tones are coming on");
+    // to calculate the note duration, take one second
+    // divided by the note type.
+    //e.g. quarter note = 1000 / 4, eighth note = 1000/8, etc.
+    int noteDuration = 1000 / noteDurations[thisNote];
+    tone(BUZZER_PIN, melody[thisNote], noteDuration);
+
+    // to distinguish the notes, set a minimum time between them.
+    // the note's duration + 30% seems to work well:
+    int pauseBetweenNotes = noteDuration * 1.30;
+    delay(pauseBetweenNotes);
+    // stop the tone playing:
+    noTone(BUZZER_PIN);
+  }
+}
+
+void DCMOTOR() {
+  digitalWrite(PIN_IN1, HIGH);  // control the motor's direction in clockwise
+  digitalWrite(PIN_IN2, LOW);   // control the motor's direction in clockwise
+
+  analogWrite(PIN_ENA, 1024);
+  delay(900);
+  analogWrite(PIN_ENA, 0);
+}
+
+void enrollfinger() {
+  while (!Serial)
+    ;  // For Yun/Leo/Micro/Zero/...
+  delay(100);
+  Serial.println("\n\nAdafruit Fingerprint sensor enrollment");
+
+  // set the data rate for the sensor serial port
+  finger.begin(57600);
+
+  if (finger.verifyPassword()) {
+    Serial.println("Found fingerprint sensor!");
+  } else {
+    Serial.println("Did not find fingerprint sensor :(");
+    while (1) { delay(1); }
+  }
+
+  Serial.println(F("Reading sensor parameters"));
+  finger.getParameters();
+  Serial.print(F("Status: 0x"));
+  Serial.println(finger.status_reg, HEX);
+  Serial.print(F("Sys ID: 0x"));
+  Serial.println(finger.system_id, HEX);
+  Serial.print(F("Capacity: "));
+  Serial.println(finger.capacity);
+  Serial.print(F("Security level: "));
+  Serial.println(finger.security_level);
+  Serial.print(F("Device address: "));
+  Serial.println(finger.device_addr, HEX);
+  Serial.print(F("Packet len: "));
+  Serial.println(finger.packet_len);
+  Serial.print(F("Baud rate: "));
+  Serial.println(finger.baud_rate);
+
+  id = 1;
+  Serial.print("Enrolling ID #");
+  while (!getFingerprintEnroll())
+    ;
+}
+uint8_t getFingerprintEnroll() {
+
+  int p = -1;
+  Serial.print("Waiting for valid finger to enroll as #");
+  Serial.println(id);
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    switch (p) {
+      case FINGERPRINT_OK:
+        Serial.println("Image taken");
+        break;
+      case FINGERPRINT_NOFINGER:
+        Serial.println(".");
+        break;
+      case FINGERPRINT_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        break;
+      case FINGERPRINT_IMAGEFAIL:
+        Serial.println("Imaging error");
+        break;
+      default:
+        Serial.println("Unknown error");
+        break;
+    }
+  }
+
+  // OK success!
+
+  p = finger.image2Tz(1);
+  switch (p) {
+    case FINGERPRINT_OK:
+      Serial.println("Image converted");
+      break;
+    case FINGERPRINT_IMAGEMESS:
+      Serial.println("Image too messy");
+      return p;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      return p;
+    case FINGERPRINT_FEATUREFAIL:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FINGERPRINT_INVALIDIMAGE:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    default:
+      Serial.println("Unknown error");
+      return p;
+  }
+
+  Serial.println("Remove finger");
+  delay(2000);
+  p = 0;
+  while (p != FINGERPRINT_NOFINGER) {
+    p = finger.getImage();
+  }
+  Serial.print("ID ");
+  Serial.println(id);
+  p = -1;
+  Serial.println("Place same finger again");
+  // I added this
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Confirm Finger");
+  // end add
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    switch (p) {
+      case FINGERPRINT_OK:
+        Serial.println("Image taken");
+        break;
+      case FINGERPRINT_NOFINGER:
+        Serial.print(".");
+        break;
+      case FINGERPRINT_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        break;
+      case FINGERPRINT_IMAGEFAIL:
+        Serial.println("Imaging error");
+        break;
+      default:
+        Serial.println("Unknown error");
+        break;
+    }
+  }
+
+  // OK success!
+
+  p = finger.image2Tz(2);
+  switch (p) {
+    case FINGERPRINT_OK:
+      Serial.println("Image converted");
+      break;
+    case FINGERPRINT_IMAGEMESS:
+      Serial.println("Image too messy");
+      return p;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      return p;
+    case FINGERPRINT_FEATUREFAIL:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FINGERPRINT_INVALIDIMAGE:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    default:
+      Serial.println("Unknown error");
+      return p;
+  }
+
+  // OK converted!
+  Serial.print("Creating model for #");
+  Serial.println(id);
+
+  p = finger.createModel();
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Prints matched!");
+  } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    return p;
+  } else if (p == FINGERPRINT_ENROLLMISMATCH) {
+    Serial.println("Fingerprints did not match");
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    return p;
+  }
+
+  Serial.print("ID ");
+  Serial.println(id);
+  p = finger.storeModel(id);
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Stored!");
+  } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    return p;
+  } else if (p == FINGERPRINT_BADLOCATION) {
+    Serial.println("Could not store in that location");
+    return p;
+  } else if (p == FINGERPRINT_FLASHERR) {
+    Serial.println("Error writing to flash");
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    return p;
+  }
+
+  return true;
+}
+uint8_t getFingerprintIDold() {
+  uint8_t p = finger.getImage();
+  switch (p) {
+    case FINGERPRINT_OK:
+      Serial.println("Image taken");
+      break;
+    case FINGERPRINT_NOFINGER:
+      Serial.println("No finger detected");
+      return p;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      return p;
+    case FINGERPRINT_IMAGEFAIL:
+      Serial.println("Imaging error");
+      return p;
+    default:
+      Serial.println("Unknown error");
+      return p;
+  }
+
+  // OK success!
+
+  p = finger.image2Tz();
+  switch (p) {
+    case FINGERPRINT_OK:
+      Serial.println("Image converted");
+      break;
+    case FINGERPRINT_IMAGEMESS:
+      Serial.println("Image too messy");
+      return p;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      return p;
+    case FINGERPRINT_FEATUREFAIL:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FINGERPRINT_INVALIDIMAGE:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    default:
+      Serial.println("Unknown error");
+      return p;
+  }
+
+  // OK converted!
+  p = finger.fingerSearch();
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Found a print match!");
+    FP = 1;
+    LOCKED = 1;
+  } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    return p;
+  } else if (p == FINGERPRINT_NOTFOUND) {
+    Serial.println("Did not find a match");
+    FP = 1;
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    return p;
+  }
+
+  // found a match!
+  Serial.print("Found ID #");
+  Serial.print(finger.fingerID);
+  Serial.print(" with confidence of ");
+  Serial.println(finger.confidence);
+
+  return finger.fingerID;
+}
+
+uint8_t getFingerprintID() {
+  uint8_t p = finger.getImage();
+  switch (p) {
+    case FINGERPRINT_OK:
+      Serial.println("Image taken");
+      break;
+    case FINGERPRINT_NOFINGER:
+      Serial.println("No finger detected");
+      return p;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      return p;
+    case FINGERPRINT_IMAGEFAIL:
+      Serial.println("Imaging error");
+      return p;
+    default:
+      Serial.println("Unknown error");
+      return p;
+  }
+
+  // OK success!
+
+  p = finger.image2Tz();
+  switch (p) {
+    case FINGERPRINT_OK:
+      Serial.println("Image converted");
+      break;
+    case FINGERPRINT_IMAGEMESS:
+      Serial.println("Image too messy");
+      return p;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      return p;
+    case FINGERPRINT_FEATUREFAIL:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FINGERPRINT_INVALIDIMAGE:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    default:
+      Serial.println("Unknown error");
+      return p;
+  }
+
+  // OK converted!
+  p = finger.fingerSearch();
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Found a print match!");
+  } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    return p;
+  } else if (p == FINGERPRINT_NOTFOUND) {
+    Serial.println("Did not find a match");
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    return p;
+  }
+
+  // found a match!
+  Serial.print("Found ID #");
+  Serial.print(finger.fingerID);
+  Serial.print(" with confidence of ");
+  Serial.println(finger.confidence);
+
+  return finger.fingerID;
+}
+
+int getFingerprintIDez() {
+  uint8_t p = finger.getImage();
+  if (p != FINGERPRINT_OK) return -1;
+
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) return -1;
+
+  p = finger.fingerFastSearch();
+  if (p != FINGERPRINT_OK) return -1;
+
+  // found a match!
+  Serial.print("Found ID #");
+  Serial.print(finger.fingerID);
+  Serial.print(" with confidence of ");
+  Serial.println(finger.confidence);
+  return finger.fingerID;
+}
+
+void Countdown(uint8_t sec) {
+  for (int i = 0; i <= sec; i++) {
+    delay(1000);
+    Serial.println(sec - i);
+    if (sec < 10) {
+      int temp = (sec - i) % 10;
+      if (sec - i > temp) {
+        lcd.setCursor(5, 1);
+        lcd.write((char)((sec - i) - temp + 48));
+      } else {
+        lcd.setCursor(5, 1);
+        lcd.write((char)(48));
+      }
+      lcd.setCursor(6, 1);
+      lcd.write((char)((temp) + 48));
+    } else {
+      lcd.setCursor(6, 1);
+      lcd.write((char)((sec - i) + 48));
+    }
+  }
+}
